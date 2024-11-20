@@ -1,4 +1,4 @@
-from typing import Tuple, Union, List
+from typing import Tuple, Union, List, Optional
 
 import torch
 import torch.nn as nn
@@ -10,8 +10,8 @@ from torchaudio import transforms as TT
 class EaBNet(nn.Module):
     def __init__(
         self,
-        k1: tuple = (2, 3),
-        k2: tuple = (1, 3),
+        k1: Tuple[int, int] = (2, 3),
+        k2: Tuple[int, int] = (1, 3),
         c: int = 64,
         M: int = 9,
         embed_dim: int = 64,
@@ -68,11 +68,11 @@ class EaBNet(nn.Module):
         self.norm_type = norm_type
 
         if is_u2:
-            self.en = U2Net_Encoder(M * 2, k1, k2, c, intra_connect, norm_type)
-            self.de = U2Net_Decoder(embed_dim, c, k1, k2, intra_connect, norm_type)
+            self.en = U2NetEncoder(M * 2, k1, k2, c, intra_connect, norm_type)
+            self.de = U2NetDecoder(embed_dim, c, k1, k2, intra_connect, norm_type)
         else:
-            self.en = UNet_Encoder(M * 2, k1, c, norm_type)
-            self.de = UNet_Decoder(embed_dim, k1, c, norm_type)
+            self.en = UNetEncoder(M * 2, k1, c, norm_type)
+            self.de = UNetDecoder(embed_dim, k1, c, norm_type)
 
         if topo_type == "mimo":
             if bf_type == "lstm":
@@ -87,7 +87,14 @@ class EaBNet(nn.Module):
             stcn_list.append(SqueezedTCNGroup(kd1, cd1, d_feat, p, is_causal, norm_type))
         self.stcns = nn.ModuleList(stcn_list)
 
-    def forward(self, inpt: Tensor) -> Tensor:
+    def forward(
+        self,
+        inpt: Tensor,
+        enc_states: List[Tensor],
+        squ_states: List[List[Tensor]],
+        dec_states: List[Tensor],
+        rnn_states: Tensor,
+    ) -> Tuple[Tensor, List[Tensor], List[List[Tensor]], List[Tensor], Tensor]:
         """
         :param inpt: (B, T, F, M, 2) -> (batchsize, seqlen, freqsize, mics, 2)
         :return: beamformed estimation: (B, 2, T, F)
@@ -97,53 +104,52 @@ class EaBNet(nn.Module):
         b_size, seq_len, freq_len, M, _ = inpt.shape
         x = inpt.transpose(-2, -1).contiguous()
         x = x.view(b_size, seq_len, freq_len, -1).permute(0, 3, 1, 2)
-        x, en_list = self.en(x)
+        x, en_list, enc_states = self.en(x, enc_states)
         c = x.shape[1]
         x = x.transpose(-2, -1).contiguous().view(b_size, -1, seq_len)
         x_acc = torch.zeros(x.size(), dtype=x.dtype, device=x.device)
-        for stcn in self.stcns:
-            x = stcn(x)
+        for i, stcn in enumerate(self.stcns):
+            x, squ_states[i] = stcn(x, squ_states[i])
             x_acc = x_acc + x
         x = x_acc
         x = x.view(b_size, c, -1, seq_len).transpose(-2, -1).contiguous()
-        x = self.de(x, en_list)
+        x, dec_states = self.de(x, en_list, dec_states)
         if self.topo_type == "mimo":
             if self.bf_type == "lstm":
-                bf_w = self.bf_map(x)  # (B, T, F, M, 2)
-            elif self.bf_type == "cnn":
-                bf_w = self.bf_map(x)
-                bf_w = bf_w.view(b_size, M, -1, seq_len, freq_len).permute(0, 3, 4, 1, 2)  # (B,T,F,M,2)
+                bf_w, rnn_states = self.bf_map(x, rnn_states)  # (B, T, F, M, 2)
+            # elif self.bf_type == "cnn":
+            #     bf_w = self.bf_map(x)
+            #     bf_w = bf_w.view(b_size, M, -1, seq_len, freq_len).permute(0, 3, 4, 1, 2)  # (B,T,F,M,2)
             else:
-                raise NotImplementedError("bf_type should be 'lstm' or 'cnn'.")
+                raise NotImplementedError("bf_type should be 'lstm'.")
             bf_w_r, bf_w_i = bf_w[..., 0], bf_w[..., -1]
             esti_x_r, esti_x_i = (bf_w_r * inpt[..., 0] - bf_w_i * inpt[..., -1]).sum(dim=-1), (
                 bf_w_r * inpt[..., -1] + bf_w_i * inpt[..., 0]
             ).sum(dim=-1)
-            return torch.stack((esti_x_r, esti_x_i), dim=1)
-        elif self.topo_type == "miso":
-            bf_w = self.bf_map(x)  # (B,2,T,F)
-            bf_w = bf_w.permute(0, 2, 3, 1)  # (B,T,F,2)
-            bf_w_r, bf_w_i = bf_w[..., 0], bf_w[..., -1]
-            # mic-0 is selected as the target mic herein
-            esti_x_r, esti_x_i = (bf_w_r * inpt[..., 0, 0] - bf_w_i * inpt[..., 0, -1]), (
-                bf_w_r * inpt[..., 0, -1] + bf_w_i * inpt[..., 0, 0]
-            )
-            return torch.stack((esti_x_r, esti_x_i), dim=1)
+        # elif self.topo_type == "miso":
+        #     bf_w = self.bf_map(x)  # (B,2,T,F)
+        #     bf_w = bf_w.permute(0, 2, 3, 1)  # (B,T,F,2)
+        #     bf_w_r, bf_w_i = bf_w[..., 0], bf_w[..., -1]
+        #     # mic-0 is selected as the target mic herein
+        #     esti_x_r, esti_x_i = (bf_w_r * inpt[..., 0, 0] - bf_w_i * inpt[..., 0, -1]), (
+        #         bf_w_r * inpt[..., 0, -1] + bf_w_i * inpt[..., 0, 0]
+        #     )
         else:
-            raise NotImplementedError("topo_type should be 'mimo' or 'miso'.")
+            raise NotImplementedError("topo_type should be 'mimo'.")
+        return torch.stack((esti_x_r, esti_x_i), dim=1), enc_states, squ_states, dec_states, rnn_states
 
 
-class U2Net_Encoder(nn.Module):
+class U2NetEncoder(nn.Module):
     def __init__(
         self,
         cin: int,
-        k1: tuple,
-        k2: tuple,
+        k1: Tuple[int, int],
+        k2: Tuple[int, int],
         c: int,
         intra_connect: str,
         norm_type: str,
     ):
-        super(U2Net_Encoder, self).__init__()
+        super(U2NetEncoder, self).__init__()
         self.cin = cin
         self.k1 = k1
         self.k2 = k2
@@ -152,27 +158,27 @@ class U2Net_Encoder(nn.Module):
         self.norm_type = norm_type
         k_beg = (2, 5)
         c_end = 64
-        meta_unet = []
-        meta_unet.append(En_unet_module(cin, c, k_beg, k2, intra_connect, norm_type, scale=4, is_deconv=False))
-        meta_unet.append(En_unet_module(c, c, k1, k2, intra_connect, norm_type, scale=3, is_deconv=False))
-        meta_unet.append(En_unet_module(c, c, k1, k2, intra_connect, norm_type, scale=2, is_deconv=False))
-        meta_unet.append(En_unet_module(c, c, k1, k2, intra_connect, norm_type, scale=1, is_deconv=False))
-        self.meta_unet_list = nn.ModuleList(meta_unet)
-        self.last_conv = nn.Sequential(
-            GateConv2dFW(c, c_end, k1, (1, 2)), NormSwitch(norm_type, "2D", c_end), nn.PReLU(c_end)
+        self.meta_unet_list = nn.ModuleList(
+            [
+                EnUnetModule(cin, c, k_beg, k2, intra_connect, norm_type, scale=4, is_deconv=False),
+                EnUnetModule(c, c, k1, k2, intra_connect, norm_type, scale=3, is_deconv=False),
+                EnUnetModule(c, c, k1, k2, intra_connect, norm_type, scale=2, is_deconv=False),
+                EnUnetModule(c, c, k1, k2, intra_connect, norm_type, scale=1, is_deconv=False),
+            ]
         )
+        self.last_conv = GateConv2dUnit(c, c_end, k1, (1, 2), norm_type, is_deconv=False)
 
-    def forward(self, x: Tensor):
+    def forward(self, x: Tensor, states: List[Tensor]) -> Tuple[Tensor, List[Tensor], List[Tensor]]:
         en_list = []
-        for meta_unet in self.meta_unet_list:
-            x = meta_unet(x)
+        for i, meta_unet in enumerate(self.meta_unet_list):
+            x, states[i] = meta_unet(x, states[i])
             en_list.append(x)
-        x = self.last_conv(x)
+        x, states[-1] = self.last_conv(x, states[-1])
         en_list.append(x)
-        return x, en_list
+        return x, en_list, states
 
 
-class UNet_Encoder(nn.Module):
+class UNetEncoder(nn.Module):
     def __init__(
         self,
         cin: int,
@@ -180,34 +186,34 @@ class UNet_Encoder(nn.Module):
         c: int,
         norm_type: str,
     ):
-        super(UNet_Encoder, self).__init__()
+        super(UNetEncoder, self).__init__()
         self.cin = cin
         self.k1 = k1
         self.c = c
         self.norm_type = norm_type
         k_beg = (2, 5)
         c_end = 64
-        unet = []
-        unet.append(nn.Sequential(GateConv2dFW(cin, c, k_beg, (1, 2)), NormSwitch(norm_type, "2D", c), nn.PReLU(c)))
-        unet.append(nn.Sequential(GateConv2dFW(c, c, k1, (1, 2)), nn.PReLU(c)))
-        unet.append(nn.Sequential(GateConv2dFW(c, c, k1, (1, 2)), nn.PReLU(c)))
-        unet.append(nn.Sequential(GateConv2dFW(c, c, k1, (1, 2)), NormSwitch(norm_type, "2D", c), nn.PReLU(c)))
-        unet.append(
-            nn.Sequential(GateConv2dFW(c, c_end, k1, (1, 2)), NormSwitch(norm_type, "2D", c_end), nn.PReLU(c_end))
+        self.unet_list = nn.ModuleList(
+            [
+                GateConv2dUnit(cin, c, k_beg, (1, 2), norm_type, is_deconv=False),
+                GateConv2dUnit(c, c, k1, (1, 2), None, is_deconv=False),
+                GateConv2dUnit(c, c, k1, (1, 2), None, is_deconv=False),
+                GateConv2dUnit(c, c, k1, (1, 2), norm_type, is_deconv=False),
+                GateConv2dUnit(c, c_end, k1, (1, 2), norm_type, is_deconv=False),
+            ]
         )
-        self.unet_list = nn.ModuleList(unet)
 
-    def forward(self, x: Tensor):
+    def forward(self, x: Tensor, states: List[Tensor]) -> Tuple[Tensor, List[Tensor], List[Tensor]]:
         en_list = []
-        for i in range(len(self.unet_list)):
-            x = self.unet_list[i](x)
+        for i, unet in enumerate(self.unet_list):
+            x, states[i] = unet(x, states[i])
             en_list.append(x)
-        return x, en_list
+        return x, en_list, states
 
 
-class U2Net_Decoder(nn.Module):
+class U2NetDecoder(nn.Module):
     def __init__(self, embed_dim, c, k1, k2, intra_connect, norm_type):
-        super(U2Net_Decoder, self).__init__()
+        super(U2NetDecoder, self).__init__()
         self.embed_dim = embed_dim
         self.k1 = k1
         self.k2 = k2
@@ -217,84 +223,107 @@ class U2Net_Decoder(nn.Module):
         c_beg = 64
         k_end = (2, 5)
 
-        meta_unet = []
-        meta_unet.append(En_unet_module(c_beg * 2, c, k1, k2, intra_connect, norm_type, scale=1, is_deconv=True))
-        meta_unet.append(En_unet_module(c * 2, c, k1, k2, intra_connect, norm_type, scale=2, is_deconv=True))
-        meta_unet.append(En_unet_module(c * 2, c, k1, k2, intra_connect, norm_type, scale=3, is_deconv=True))
-        meta_unet.append(En_unet_module(c * 2, c, k1, k2, intra_connect, norm_type, scale=4, is_deconv=True))
-        self.meta_unet_list = nn.ModuleList(meta_unet)
-        self.last_conv = nn.Sequential(
-            GateConvTranspose2dFW(c * 2, embed_dim, k_end, (1, 2)),
-            NormSwitch(norm_type, "2D", embed_dim),
-            nn.PReLU(embed_dim),
+        self.meta_unet_list = nn.ModuleList(
+            [
+                EnUnetModule(c_beg * 2, c, k1, k2, intra_connect, norm_type, scale=1, is_deconv=True),
+                EnUnetModule(c * 2, c, k1, k2, intra_connect, norm_type, scale=2, is_deconv=True),
+                EnUnetModule(c * 2, c, k1, k2, intra_connect, norm_type, scale=3, is_deconv=True),
+                EnUnetModule(c * 2, c, k1, k2, intra_connect, norm_type, scale=4, is_deconv=True),
+            ]
         )
+        self.last_conv = GateConv2dUnit(c * 2, embed_dim, k_end, (1, 2), norm_type, is_deconv=True)
 
-    def forward(self, x: Tensor, en_list: List[Tensor]) -> Tensor:
+    def forward(self, x: Tensor, en_list: List[Tensor], states: List[Tensor]) -> Tuple[Tensor, List[Tensor]]:
         for i, meta_unet in enumerate(self.meta_unet_list):
             tmp = torch.cat((x, en_list[-(i + 1)]), dim=1)
-            x = meta_unet(tmp)
+            x, states[i] = meta_unet(tmp, states[i])
         x = torch.cat((x, en_list[0]), dim=1)
-        x = self.last_conv(x)
-        return x
+        x, states[-1] = self.last_conv(x, states[-1])
+        return x, states
 
 
-class UNet_Decoder(nn.Module):
+class UNetDecoder(nn.Module):
     def __init__(
         self,
         embed_dim: int,
-        k1: tuple,
+        k1: Tuple[int, int],
         c: int,
         norm_type: str,
     ):
-        super(UNet_Decoder, self).__init__()
+        super(UNetDecoder, self).__init__()
         self.embed_dim = embed_dim
         self.k1 = k1
         self.c = c
         self.norm_type = norm_type
         c_beg = 64  # the channels of the last encoder and the first decoder are fixed at 64 by default
         k_end = (2, 5)
-        unet = []
-        unet.append(
-            nn.Sequential(GateConvTranspose2dFW(c_beg * 2, c, k1, (1, 2)), NormSwitch(norm_type, "2D", c), nn.PReLU(c))
+        self.unet_list = nn.ModuleList(
+            [
+                GateConv2dUnit(c_beg * 2, c, k1, (1, 2), norm_type, is_deconv=True),
+                GateConv2dUnit(c * 2, c, k1, (1, 2), norm_type, is_deconv=True),
+                GateConv2dUnit(c * 2, c, k1, (1, 2), norm_type, is_deconv=True),
+                GateConv2dUnit(c * 2, c, k1, (1, 2), norm_type, is_deconv=True),
+                GateConv2dUnit(c * 2, embed_dim, k_end, (1, 2), norm_type, is_deconv=True),
+            ]
         )
-        unet.append(
-            nn.Sequential(GateConvTranspose2dFW(c * 2, c, k1, (1, 2)), NormSwitch(norm_type, "2D", c), nn.PReLU(c))
-        )
-        unet.append(
-            nn.Sequential(GateConvTranspose2dFW(c * 2, c, k1, (1, 2)), NormSwitch(norm_type, "2D", c), nn.PReLU(c))
-        )
-        unet.append(
-            nn.Sequential(GateConvTranspose2dFW(c * 2, c, k1, (1, 2)), NormSwitch(norm_type, "2D", c), nn.PReLU(c))
-        )
-        unet.append(
-            nn.Sequential(
-                GateConvTranspose2dFW(c * 2, embed_dim, k_end, (1, 2)),
-                NormSwitch(norm_type, "2D", embed_dim),
-                nn.PReLU(embed_dim),
-            )
-        )
-        self.unet_list = nn.ModuleList(unet)
 
-    def forward(self, x: Tensor, en_list: list) -> Tensor:
-        for i in range(len(self.unet_list)):
+    def forward(self, x: Tensor, en_list: List[Tensor], states: List[Tensor]) -> Tuple[Tensor, List[Tensor]]:
+        for i, unet in enumerate(self.unet_list):
             tmp = torch.cat((x, en_list[-(i + 1)]), dim=1)  # skip connections
-            x = self.unet_list[i](tmp)
-        return x
+            x, states[i] = unet(tmp, states[i])
+        return x, states
 
 
-class En_unet_module(nn.Module):
+class GateConv2dUnit(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: Tuple[int, int],
+        stride: Tuple[int, int],
+        norm_type: Optional[str] = None,
+        is_deconv: bool = False,
+    ):
+        super(GateConv2dUnit, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.norm_type = norm_type
+        self.is_deconv = is_deconv
+
+        if is_deconv:
+            self.in_conv = GateConvTranspose2dFW(in_channels, out_channels, kernel_size, stride)
+        else:
+            self.in_conv = GateConv2dFW(in_channels, out_channels, kernel_size, stride)
+
+        if self.norm_type is not None:
+            self.norm = NormSwitch(norm_type, "2D", out_channels)
+
+        self.act = nn.PReLU(out_channels)
+        ...
+
+    def forward(self, inputs: Tensor, states: Tensor) -> Tuple[Tensor, Tensor]:
+        output, states = self.in_conv(inputs, states)
+        if self.norm_type is not None:
+            output = self.norm(output)
+        output = self.act(output)
+        return output, states
+
+
+class EnUnetModule(nn.Module):
     def __init__(
         self,
         cin: int,
         cout: int,
-        k1: tuple,
-        k2: tuple,
+        k1: Tuple[int, int],
+        k2: Tuple[int, int],
         intra_connect: str,
         norm_type: str,
         scale: int,
         is_deconv: bool,
     ):
-        super(En_unet_module, self).__init__()
+        super(EnUnetModule, self).__init__()
         self.k1 = k1
         self.k2 = k2
         self.cin = cin
@@ -303,29 +332,22 @@ class En_unet_module(nn.Module):
         self.scale = scale
         self.is_deconv = is_deconv
 
-        in_conv_list = []
-        if not is_deconv:
-            in_conv_list.append(GateConv2dFW(cin, cout, k1, (1, 2)))
-        else:
-            in_conv_list.append(GateConvTranspose2dFW(cin, cout, k1, (1, 2)))
-        in_conv_list.append(NormSwitch(norm_type, "2D", cout))
-        in_conv_list.append(nn.PReLU(cout))
-        self.in_conv = nn.Sequential(*in_conv_list)
+        self.in_conv = GateConv2dUnit(cin, cout, k1, (1, 2), norm_type, is_deconv)
 
         enco_list, deco_list = [], []
         for _ in range(scale):
-            enco_list.append(Conv2dunit(k2, cout, norm_type))
+            enco_list.append(Conv2dUnit(k2, cout, norm_type))
         for i in range(scale):
             if i == 0:
-                deco_list.append(Deconv2dunit(k2, cout, "add", norm_type))
+                deco_list.append(Deconv2dUnit(k2, cout, "add", norm_type))
             else:
-                deco_list.append(Deconv2dunit(k2, cout, intra_connect, norm_type))
+                deco_list.append(Deconv2dUnit(k2, cout, intra_connect, norm_type))
         self.enco = nn.ModuleList(enco_list)
         self.deco = nn.ModuleList(deco_list)
-        self.skip_connect = Skip_connect(intra_connect)
+        self.skip_connect = SkipConnect(intra_connect)
 
-    def forward(self, x):
-        x_resi = self.in_conv(x)
+    def forward(self, x: Tensor, states: Tensor) -> Tuple[Tensor, Tensor]:
+        x_resi, states = self.in_conv(x, states)
         x = x_resi
         x_list = []
         for enco_layer in self.enco:
@@ -340,17 +362,17 @@ class En_unet_module(nn.Module):
                 x = deco_layer(x_con)
         x_resi = x_resi + x
         del x_list
-        return x_resi
+        return x_resi, states
 
 
-class Conv2dunit(nn.Module):
+class Conv2dUnit(nn.Module):
     def __init__(
         self,
-        k: tuple,
+        k: Tuple[int, int],
         c: int,
         norm_type: str,
     ):
-        super(Conv2dunit, self).__init__()
+        super(Conv2dUnit, self).__init__()
         self.k = k
         self.c = c
         self.norm_type = norm_type
@@ -360,15 +382,15 @@ class Conv2dunit(nn.Module):
         return self.conv(x)
 
 
-class Deconv2dunit(nn.Module):
+class Deconv2dUnit(nn.Module):
     def __init__(
         self,
-        k: tuple,
+        k: Tuple[int, int],
         c: int,
         intra_connect: str,
         norm_type: str,
     ):
-        super(Deconv2dunit, self).__init__()
+        super(Deconv2dUnit, self).__init__()
         self.k, self.c = k, c
         self.intra_connect = intra_connect
         self.norm_type = norm_type
@@ -400,7 +422,6 @@ class GateConv2dFW(nn.Module):
         self.stride = stride
 
         assert stride[0] == 1, f"{self.__class__.__name__} only supports stride[0] == 1"
-        self.state = torch.empty(0)
 
         k_t = kernel_size[0]
         if k_t > 1:
@@ -415,23 +436,20 @@ class GateConv2dFW(nn.Module):
                 in_channels=in_channels, out_channels=out_channels * 2, kernel_size=kernel_size, stride=stride
             )
 
-    def forward(self, inputs: Tensor) -> Tensor:
-        """inputs: (batch_size, channels, time=1, freq)"""
-        # assert inputs.shape[-2] == 1, f"{self.__class__.__name__} only supports single frame input"
-
+    def forward(self, inputs: Tensor, states: Tensor) -> Tuple[Tensor, Tensor]:
+        """
+        inputs: (batch_size=1, channels, time=1, freq)
+        states: (batch_size=1, channels, kernel_size[0]-1, freq)
+        """
         if inputs.ndim == 3:
             inputs = inputs.unsqueeze(dim=1)
 
-        if self.state.shape[0] == 0:
-            B, C, _, F = inputs.shape
-            self.state = torch.zeros(B, C, self.kernel_size[0] - 1, F, dtype=inputs.dtype, device=inputs.device)
-
-        inputs = torch.cat([self.state, inputs], dim=2)
-        self.state = inputs[:, :, 1:]
+        inputs = torch.cat([states, inputs], dim=2)
+        states = inputs[:, :, 1:]
 
         x = self.conv(inputs)
         outputs, gate = x.chunk(2, dim=1)
-        return outputs * gate.sigmoid()
+        return outputs * gate.sigmoid(), states
 
 
 class GateConvTranspose2dFW(nn.Module):
@@ -448,7 +466,6 @@ class GateConvTranspose2dFW(nn.Module):
         self.kernel_size = kernel_size
 
         assert stride[0] == 1, f"{self.__class__.__name__} only supports stride[0] == 1"
-        self.state = torch.empty(0)
 
         k_t = kernel_size[0]
         if k_t > 1:
@@ -467,28 +484,25 @@ class GateConvTranspose2dFW(nn.Module):
                 in_channels=in_channels, out_channels=out_channels * 2, kernel_size=kernel_size, stride=stride
             )
 
-    def forward(self, inputs: Tensor) -> Tensor:
-        """inputs: (batch_size, channels, time=1, freq)"""
-        # assert inputs.shape[-2] == 1, f"{self.__class__.__name__} only supports single frame input"
-
+    def forward(self, inputs: Tensor, states: Tensor) -> Tuple[Tensor, Tensor]:
+        """
+        inputs: (batch_size=1, channels, time=1, feat)
+        states: (batch_size=1, channels, kernel_size[0]-1, feat)
+        """
         if inputs.ndim == 3:
             inputs = inputs.unsqueeze(dim=1)
 
-        if self.state.shape[0] == 0:
-            B, C, _, F = inputs.shape
-            self.state = torch.zeros(B, C, self.kernel_size[0] - 1, F, dtype=inputs.dtype, device=inputs.device)
-
-        inputs = torch.cat([self.state, inputs], dim=2)
-        self.state = inputs[:, :, 1:]
+        inputs = torch.cat([states, inputs], dim=2)
+        states = inputs[:, :, 1:]
 
         x = self.conv(inputs)
         outputs, gate = x.chunk(2, dim=1)
-        return outputs * gate.sigmoid()
+        return outputs * gate.sigmoid(), states
 
 
-class Skip_connect(nn.Module):
+class SkipConnect(nn.Module):
     def __init__(self, connect):
-        super(Skip_connect, self).__init__()
+        super(SkipConnect, self).__init__()
         self.connect = connect
 
     def forward(self, x_main, x_aux):
@@ -522,28 +536,50 @@ class SqueezedTCNGroup(nn.Module):
         # Components
         self.tcm_list = nn.ModuleList([SqueezedTCM_FW(kd1, cd1, 2**i, d_feat, is_causal, norm_type) for i in range(p)])
 
-    def forward(self, x):
-        for tcm in self.tcm_list:
-            x = tcm(x)
-        return x
+    def forward(self, x: Tensor, states: List[Tensor]) -> Tuple[Tensor, List[Tensor]]:
+        for i, tcm in enumerate(self.tcm_list):
+            x, states[i] = tcm(x, states[i])
+        return x, states
 
 
-class CausalConstantPad1d(nn.Module):
-    def __init__(self, padding, value=0.0):
-        super(CausalConstantPad1d, self).__init__()
-        self.padding = padding
-        self.value = value
-        self.state = torch.empty(0)
+class SqueezedConv1dUnit(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        dilation: int,
+        is_causal: bool,
+        norm_type: str,
+    ):
+        super(SqueezedConv1dUnit, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.dilation = dilation
+        self.is_causal = is_causal
+        self.norm_type = norm_type
 
-    def forward(self, inputs: Tensor):
-        # assert inputs.shape[-1] == 1, "CausalConstantPad1d only supports 1 time frame input"
-
-        if self.state.shape[0] == 0:
-            inputs = nn.functional.pad(inputs, (*self.padding, 0, 0), "constant", self.value)
+        if is_causal:
+            self.pad = ((kernel_size - 1) * dilation, 0)
         else:
-            inputs = torch.cat([self.state, inputs], dim=-1)
-        self.state = inputs[..., 1:]
-        return inputs
+            raise NotImplementedError("Non-causal mode is not supported yet.")
+
+        self.act = nn.PReLU(in_channels)
+        self.norm = NormSwitch(norm_type, "1D", in_channels)
+        # self.pad_layer = nn.ConstantPad1d(self.pad, 0)  # replace by state as input
+        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size, dilation=dilation, bias=False)
+        ...
+
+    def forward(self, x: Tensor, state: Tensor) -> Tuple[Tensor, Tensor]:
+        x = self.act(x)
+        x = self.norm(x)
+
+        x = torch.cat([state, x], dim=-1)
+        state = x[..., 1:]
+        x = self.conv(x)
+
+        return x, state
 
 
 class SqueezedTCM_FW(nn.Module):
@@ -565,34 +601,29 @@ class SqueezedTCM_FW(nn.Module):
         self.norm_type = norm_type
 
         self.in_conv = nn.Conv1d(d_feat, cd1, 1, bias=False)
-        if is_causal:
-            self.pad = ((kd1 - 1) * dilation, 0)
-        else:
-            self.pad = ((kd1 - 1) * dilation // 2, (kd1 - 1) * dilation // 2)
-        self.left_conv = nn.Sequential(
-            nn.PReLU(cd1),
-            NormSwitch(norm_type, "1D", cd1),
-            CausalConstantPad1d(self.pad),
-            nn.Conv1d(cd1, cd1, kd1, dilation=dilation, bias=False),
-        )
-        self.right_conv = nn.Sequential(
-            nn.PReLU(cd1),
-            NormSwitch(norm_type, "1D", cd1),
-            CausalConstantPad1d(self.pad),
-            nn.Conv1d(cd1, cd1, kernel_size=kd1, dilation=dilation, bias=False),
-            nn.Sigmoid(),
-        )
+        self.left_conv = SqueezedConv1dUnit(cd1, cd1, kd1, dilation, is_causal, norm_type)
+        self.right_conv = SqueezedConv1dUnit(cd1, cd1, kd1, dilation, is_causal, norm_type)
         self.out_conv = nn.Sequential(
-            nn.PReLU(cd1), NormSwitch(norm_type, "1D", cd1), nn.Conv1d(cd1, d_feat, kernel_size=1, bias=False)
+            nn.PReLU(cd1),
+            NormSwitch(norm_type, "1D", cd1),
+            nn.Conv1d(cd1, d_feat, kernel_size=1, bias=False),
         )
+        self.sigmoid = nn.Sigmoid()
+        ...
 
-    def forward(self, x):
+    def forward(self, x: Tensor, state: Tensor) -> Tuple[Tensor, Tensor]:
         resi = x
         x = self.in_conv(x)
-        x = self.left_conv(x) * self.right_conv(x)
+
+        state0, state1 = state[..., 0], state[..., 1]
+        x_l, state0 = self.left_conv(x, state0)
+        x_r, state1 = self.right_conv(x, state1)
+        state = torch.stack([state0, state1], dim=-1)
+
+        x = x_l * self.sigmoid(x_r)
         x = self.out_conv(x)
         x = x + resi
-        return x
+        return x, state
 
 
 class LSTM_BF_FW(nn.Module):
@@ -601,44 +632,31 @@ class LSTM_BF_FW(nn.Module):
         self.embed_dim = embed_dim
         self.M = M
         self.hid_node = hid_node
-        self.state = torch.empty(0)
 
         # Components
         self.rnn = nn.LSTM(input_size=embed_dim, hidden_size=hid_node, num_layers=2, batch_first=True)
         self.w_dnn = nn.Sequential(nn.Linear(hid_node, hid_node), nn.ReLU(True), nn.Linear(hid_node, 2 * M))
         self.norm = nn.LayerNorm([embed_dim])
 
-    def forward(self, embed_x: Tensor) -> Tensor:
+    def forward(self, embed_x: Tensor, state: Tensor) -> Tuple[Tensor, Tensor]:
         """
         formulate the bf operation
         :param embed_x: (B, C, T, F)
+        :param state: (2, B*F, T=1, embed_dim)
         :return: (B, T, F, M, 2)
         """
-        # assert embed_x.shape[2] == 1, "The time dimension of input should be 1"
         # norm
         B, _, T, F = embed_x.shape
         x = self.norm(embed_x.permute(0, 3, 2, 1).contiguous())
         x = x.view(B * F, T, -1)
 
-        if self.state.shape[0] == 0:
-            x, state = self.rnn(x)
-        else:
-            state = self.state[..., 0], self.state[..., 1]
-            x, state = self.rnn(x, state)
-        self.state = torch.stack(state, dim=-1)
+        states = state[..., 0], state[..., 1]
+        x, states = self.rnn(x, states)
+        state = torch.stack(states, dim=-1)
 
         x = x.view(B, F, T, -1).transpose(1, 2).contiguous()
         bf_w = self.w_dnn(x).view(B, T, F, self.M, 2)
-        return bf_w
-
-
-class Chomp_T(nn.Module):
-    def __init__(self, t):
-        super(Chomp_T, self).__init__()
-        self.t = t
-
-    def forward(self, x):
-        return x[:, :, : -self.t, :]
+        return bf_w, state
 
 
 class NormSwitch(nn.Module):
