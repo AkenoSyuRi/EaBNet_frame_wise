@@ -10,12 +10,13 @@ class LSTM_BF_FW(nn.Module):
         self.embed_dim = embed_dim
         self.M = M
         self.hid_node = hid_node
-        self.state1 = None
-        self.state2 = None
+        self.state = torch.empty(0)
+        # self.state1 = None
+        # self.state2 = None
 
         # Components
-        self.rnn1 = nn.LSTM(input_size=embed_dim, hidden_size=hid_node, batch_first=True)
-        self.rnn2 = nn.LSTM(input_size=hid_node, hidden_size=hid_node, batch_first=True)
+        self.rnn = nn.LSTM(input_size=embed_dim, hidden_size=hid_node, num_layers=2, batch_first=True)
+        # self.rnn2 = nn.LSTM(input_size=hid_node, hidden_size=hid_node, batch_first=True)
         self.w_dnn = nn.Sequential(nn.Linear(hid_node, hid_node), nn.ReLU(True), nn.Linear(hid_node, 2 * M))
         self.norm = nn.LayerNorm([embed_dim])
 
@@ -30,18 +31,38 @@ class LSTM_BF_FW(nn.Module):
         B, _, T, F = embed_x.shape
         x = self.norm(embed_x.permute(0, 3, 2, 1).contiguous())
         x = x.view(B * F, T, -1)
-        x, self.state1 = self.rnn1(x, self.state1)
-        x, self.state2 = self.rnn2(x, self.state2)
+
+        if self.state.shape[0] == 0:
+            x, state = self.rnn(x)
+        else:
+            state = self.state[..., 0], self.state[..., 1]
+            x, state = self.rnn(x, state)
+        self.state = torch.stack(state, dim=-1)
+
+        # x, self.state1 = self.rnn1(x, self.state1)
+        # x, self.state2 = self.rnn2(x, self.state2)
         x = x.view(B, F, T, -1).transpose(1, 2).contiguous()
         bf_w = self.w_dnn(x).view(B, T, F, self.M, 2)
         return bf_w
+
+
+def load_state_dict_from1to2(dict1, dict2):
+    for k, v in dict1.items():
+        if "rnn1" in k:
+            k = k.replace("rnn1.", "rnn.")
+        if "rnn2" in k:
+            k = k.replace("rnn2.", "rnn.").replace("l0", "l1")
+        dict2[k].copy_(v)
+    ...
 
 
 def main():
     x = torch.randn(3, 64, 200, 161)
     net1 = LSTM_BF(64, 8)
     net2 = LSTM_BF_FW(64, 8)
-    net2.load_state_dict(net1.state_dict())
+    load_state_dict_from1to2(net1.state_dict(), net2.state_dict())
+    # net2.load_state_dict(net1.state_dict())
+    net2 = torch.jit.script(net2)
     net1.eval()
     net2.eval()
 

@@ -25,9 +25,20 @@ def get_default_config():
     return vars()
 
 
-def random_init_state_dict(state_dict):
-    for key in state_dict.keys():
-        state_dict[key].data.uniform_(-0.1, 0.1)
+def load_state_dict_from1to2(dict1, dict2):
+    for value in dict1.values():
+        value.data.uniform_(-0.1, 0.1)
+
+    for value in dict2.values():
+        value.data.zero_()
+
+    for k, v in dict1.items():
+        if "rnn1" in k:
+            k = k.replace("rnn1.", "rnn.")
+        if "rnn2" in k:
+            k = k.replace("rnn2.", "rnn.").replace("l0", "l1")
+        dict2[k].copy_(v)
+    ...
 
 
 def test_model_causality():
@@ -51,8 +62,8 @@ def test_frame_wise():
     kwargs = get_default_config()
     net1 = EaBNet(**kwargs)
     net2 = EaBNetFW(**kwargs)
-    random_init_state_dict(net1.state_dict())
-    net2.load_state_dict(net1.state_dict())
+    load_state_dict_from1to2(net1.state_dict(), net2.state_dict())
+    net2 = torch.jit.script(net2)
     net1.eval()
     net2.eval()
 

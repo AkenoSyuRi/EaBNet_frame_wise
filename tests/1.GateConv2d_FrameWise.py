@@ -21,7 +21,7 @@ class GateConv2dFW(nn.Module):
         self.stride = stride
 
         assert stride[0] == 1, f"{self.__class__.__name__} only supports stride[0] == 1"
-        self.state = None
+        self.state = torch.empty(0)
 
         k_t = kernel_size[0]
         if k_t > 1:
@@ -38,17 +38,16 @@ class GateConv2dFW(nn.Module):
 
     def forward(self, inputs: Tensor) -> Tensor:
         """inputs: (batch_size, channels, time=1, freq)"""
-        assert inputs.shape[-2] == 1, f"{self.__class__.__name__} only supports single frame input"
+        # assert inputs.shape[-2] == 1, f"{self.__class__.__name__} only supports single frame input"
 
         if inputs.ndim == 3:
             inputs = inputs.unsqueeze(dim=1)
 
-        if self.state is None:
+        if self.state.shape[0] == 0:
             B, C, _, F = inputs.shape
-            state = torch.zeros(B, C, self.kernel_size[0] - 1, F, dtype=inputs.dtype, device=inputs.device)
-            inputs = torch.cat([state, inputs], dim=2)
-        else:
-            inputs = torch.cat([self.state, inputs], dim=2)
+            self.state = torch.zeros(B, C, self.kernel_size[0] - 1, F, dtype=inputs.dtype, device=inputs.device)
+
+        inputs = torch.cat([self.state, inputs], dim=2)
         self.state = inputs[:, :, 1:]
 
         x = self.conv(inputs)
@@ -62,6 +61,7 @@ def main():
     net1 = GateConv2d(16, 32, (2, 3), (1, 3))
     net2 = GateConv2dFW(16, 32, (2, 3), (1, 3))
     net2.load_state_dict(net1.state_dict())
+    net2 = torch.jit.script(net2)
     net1.eval()
     net2.eval()
 

@@ -13,6 +13,7 @@ def main():
     net2 = nn.ModuleList([SqueezedTCNGroup_FrameWise(5, 64, 256, 6, True, "iLN") for _ in range(q)])
 
     net2.load_state_dict(net1.state_dict())
+    net2 = torch.jit.script(net2)
     net1.eval()
     net2.eval()
 

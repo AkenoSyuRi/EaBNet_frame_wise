@@ -1,4 +1,4 @@
-from typing import Tuple, Union
+from typing import Tuple, Union, List
 
 import numpy as np
 import torch
@@ -101,9 +101,9 @@ class EaBNet(nn.Module):
         x, en_list = self.en(x)
         c = x.shape[1]
         x = x.transpose(-2, -1).contiguous().view(b_size, -1, seq_len)
-        x_acc = Variable(torch.zeros(x.size()), requires_grad=True).to(x.device)
-        for i in range(len(self.stcns)):
-            x = self.stcns[i](x)
+        x_acc = torch.zeros(x.size(), dtype=x.dtype, device=x.device)
+        for stcn in self.stcns:
+            x = stcn(x)
             x_acc = x_acc + x
         x = x_acc
         x = x.view(b_size, c, -1, seq_len).transpose(-2, -1).contiguous()
@@ -114,6 +114,8 @@ class EaBNet(nn.Module):
             elif self.bf_type == "cnn":
                 bf_w = self.bf_map(x)
                 bf_w = bf_w.view(b_size, M, -1, seq_len, freq_len).permute(0, 3, 4, 1, 2)  # (B,T,F,M,2)
+            else:
+                raise NotImplementedError("bf_type should be 'lstm' or 'cnn'.")
             bf_w_r, bf_w_i = bf_w[..., 0], bf_w[..., -1]
             esti_x_r, esti_x_i = (bf_w_r * inpt[..., 0] - bf_w_i * inpt[..., -1]).sum(dim=-1), (
                 bf_w_r * inpt[..., -1] + bf_w_i * inpt[..., 0]
@@ -128,6 +130,8 @@ class EaBNet(nn.Module):
                 bf_w_r * inpt[..., 0, -1] + bf_w_i * inpt[..., 0, 0]
             )
             return torch.stack((esti_x_r, esti_x_i), dim=1)
+        else:
+            raise NotImplementedError("topo_type should be 'mimo' or 'miso'.")
 
 
 class U2Net_Encoder(nn.Module):
@@ -161,8 +165,8 @@ class U2Net_Encoder(nn.Module):
 
     def forward(self, x: Tensor):
         en_list = []
-        for i in range(len(self.meta_unet_list)):
-            x = self.meta_unet_list[i](x)
+        for meta_unet in self.meta_unet_list:
+            x = meta_unet(x)
             en_list.append(x)
         x = self.last_conv(x)
         en_list.append(x)
@@ -226,10 +230,10 @@ class U2Net_Decoder(nn.Module):
             nn.PReLU(embed_dim),
         )
 
-    def forward(self, x: Tensor, en_list: list) -> Tensor:
-        for i in range(len(self.meta_unet_list)):
+    def forward(self, x: Tensor, en_list: List[Tensor]) -> Tensor:
+        for i, meta_unet in enumerate(self.meta_unet_list):
             tmp = torch.cat((x, en_list[-(i + 1)]), dim=1)
-            x = self.meta_unet_list[i](tmp)
+            x = meta_unet(tmp)
         x = torch.cat((x, en_list[0]), dim=1)
         x = self.last_conv(x)
         return x
@@ -325,16 +329,16 @@ class En_unet_module(nn.Module):
         x_resi = self.in_conv(x)
         x = x_resi
         x_list = []
-        for i in range(len(self.enco)):
-            x = self.enco[i](x)
+        for enco_layer in self.enco:
+            x = enco_layer(x)
             x_list.append(x)
 
-        for i in range(len(self.deco)):
+        for i, deco_layer in enumerate(self.deco):
             if i == 0:
-                x = self.deco[i](x)
+                x = deco_layer(x)
             else:
                 x_con = self.skip_connect(x, x_list[-(i + 1)])
-                x = self.deco[i](x_con)
+                x = deco_layer(x_con)
         x_resi = x_resi + x
         del x_list
         return x_resi
@@ -397,7 +401,7 @@ class GateConv2dFW(nn.Module):
         self.stride = stride
 
         assert stride[0] == 1, f"{self.__class__.__name__} only supports stride[0] == 1"
-        self.state = None
+        self.state = torch.empty(0)
 
         k_t = kernel_size[0]
         if k_t > 1:
@@ -414,17 +418,16 @@ class GateConv2dFW(nn.Module):
 
     def forward(self, inputs: Tensor) -> Tensor:
         """inputs: (batch_size, channels, time=1, freq)"""
-        assert inputs.shape[-2] == 1, f"{self.__class__.__name__} only supports single frame input"
+        # assert inputs.shape[-2] == 1, f"{self.__class__.__name__} only supports single frame input"
 
         if inputs.ndim == 3:
             inputs = inputs.unsqueeze(dim=1)
 
-        if self.state is None:
+        if self.state.shape[0] == 0:
             B, C, _, F = inputs.shape
-            state = torch.zeros(B, C, self.kernel_size[0] - 1, F, dtype=inputs.dtype, device=inputs.device)
-            inputs = torch.cat([state, inputs], dim=2)
-        else:
-            inputs = torch.cat([self.state, inputs], dim=2)
+            self.state = torch.zeros(B, C, self.kernel_size[0] - 1, F, dtype=inputs.dtype, device=inputs.device)
+
+        inputs = torch.cat([self.state, inputs], dim=2)
         self.state = inputs[:, :, 1:]
 
         x = self.conv(inputs)
@@ -446,7 +449,7 @@ class GateConvTranspose2dFW(nn.Module):
         self.kernel_size = kernel_size
 
         assert stride[0] == 1, f"{self.__class__.__name__} only supports stride[0] == 1"
-        self.state = None
+        self.state = torch.empty(0)
 
         k_t = kernel_size[0]
         if k_t > 1:
@@ -467,17 +470,16 @@ class GateConvTranspose2dFW(nn.Module):
 
     def forward(self, inputs: Tensor) -> Tensor:
         """inputs: (batch_size, channels, time=1, freq)"""
-        assert inputs.shape[-2] == 1, f"{self.__class__.__name__} only supports single frame input"
+        # assert inputs.shape[-2] == 1, f"{self.__class__.__name__} only supports single frame input"
 
         if inputs.ndim == 3:
             inputs = inputs.unsqueeze(dim=1)
 
-        if self.state is None:
+        if self.state.shape[0] == 0:
             B, C, _, F = inputs.shape
-            state = torch.zeros(B, C, self.kernel_size[0] - 1, F, dtype=inputs.dtype, device=inputs.device)
-            inputs = torch.cat([state, inputs], dim=2)
-        else:
-            inputs = torch.cat([self.state, inputs], dim=2)
+            self.state = torch.zeros(B, C, self.kernel_size[0] - 1, F, dtype=inputs.dtype, device=inputs.device)
+
+        inputs = torch.cat([self.state, inputs], dim=2)
         self.state = inputs[:, :, 1:]
 
         x = self.conv(inputs)
@@ -495,6 +497,8 @@ class Skip_connect(nn.Module):
             x = x_main + x_aux
         elif self.connect == "cat":
             x = torch.cat((x_main, x_aux), dim=1)
+        else:
+            raise ValueError(f"Unsupported intra_connect type: {self.connect}")
         return x
 
 
@@ -520,8 +524,8 @@ class SqueezedTCNGroup(nn.Module):
         self.tcm_list = nn.ModuleList([SqueezedTCM_FW(kd1, cd1, 2**i, d_feat, is_causal, norm_type) for i in range(p)])
 
     def forward(self, x):
-        for i in range(self.p):
-            x = self.tcm_list[i](x)
+        for tcm in self.tcm_list:
+            x = tcm(x)
         return x
 
 
@@ -530,12 +534,12 @@ class CausalConstantPad1d(nn.Module):
         super(CausalConstantPad1d, self).__init__()
         self.padding = padding
         self.value = value
-        self.state = None
+        self.state = torch.empty(0)
 
     def forward(self, inputs: Tensor):
-        assert inputs.shape[-1] == 1, "CausalConstantPad1d only supports 1 time frame input"
+        # assert inputs.shape[-1] == 1, "CausalConstantPad1d only supports 1 time frame input"
 
-        if self.state is None:
+        if self.state.shape[0] == 0:
             inputs = nn.functional.pad(inputs, (*self.padding, 0, 0), "constant", self.value)
         else:
             inputs = torch.cat([self.state, inputs], dim=-1)
@@ -560,8 +564,6 @@ class SqueezedTCM_FW(nn.Module):
         self.d_feat = d_feat
         self.is_causal = is_causal
         self.norm_type = norm_type
-        self.state1 = None
-        self.state2 = None
 
         self.in_conv = nn.Conv1d(d_feat, cd1, 1, bias=False)
         if is_causal:
@@ -600,12 +602,10 @@ class LSTM_BF_FW(nn.Module):
         self.embed_dim = embed_dim
         self.M = M
         self.hid_node = hid_node
-        self.state1 = None
-        self.state2 = None
+        self.state = torch.empty(0)
 
         # Components
-        self.rnn1 = nn.LSTM(input_size=embed_dim, hidden_size=hid_node, batch_first=True)
-        self.rnn2 = nn.LSTM(input_size=hid_node, hidden_size=hid_node, batch_first=True)
+        self.rnn = nn.LSTM(input_size=embed_dim, hidden_size=hid_node, num_layers=2, batch_first=True)
         self.w_dnn = nn.Sequential(nn.Linear(hid_node, hid_node), nn.ReLU(True), nn.Linear(hid_node, 2 * M))
         self.norm = nn.LayerNorm([embed_dim])
 
@@ -615,13 +615,19 @@ class LSTM_BF_FW(nn.Module):
         :param embed_x: (B, C, T, F)
         :return: (B, T, F, M, 2)
         """
-        assert embed_x.shape[2] == 1, "The time dimension of input should be 1"
+        # assert embed_x.shape[2] == 1, "The time dimension of input should be 1"
         # norm
         B, _, T, F = embed_x.shape
         x = self.norm(embed_x.permute(0, 3, 2, 1).contiguous())
         x = x.view(B * F, T, -1)
-        x, self.state1 = self.rnn1(x, self.state1)
-        x, self.state2 = self.rnn2(x, self.state2)
+
+        if self.state.shape[0] == 0:
+            x, state = self.rnn(x)
+        else:
+            state = self.state[..., 0], self.state[..., 1]
+            x, state = self.rnn(x, state)
+        self.state = torch.stack(state, dim=-1)
+
         x = x.view(B, F, T, -1).transpose(1, 2).contiguous()
         bf_w = self.w_dnn(x).view(B, T, F, self.M, 2)
         return bf_w
@@ -757,8 +763,9 @@ class CumulativeLayerNorm1d(nn.Module):
         cum_sum = torch.cumsum(inpt.sum(1), dim=1)  # (B,T)
         cum_power_sum = torch.cumsum(inpt.pow(2).sum(1), dim=1)  # (B,T)
 
-        entry_cnt = np.arange(channel, channel * (seq_len + 1), channel)
-        entry_cnt = torch.from_numpy(entry_cnt).type(inpt.type())
+        entry_cnt = torch.arange(channel, channel * (seq_len + 1), channel)
+        # entry_cnt = np.arange(channel, channel * (seq_len + 1), channel)
+        # entry_cnt = torch.from_numpy(entry_cnt).type(inpt.type())
         entry_cnt = entry_cnt.view(1, -1).expand_as(cum_sum)  # (B,T)
 
         cum_mean = cum_sum / entry_cnt  # (B,T)
@@ -799,8 +806,9 @@ class CumulativeLayerNorm2d(nn.Module):
         cum_sum = torch.cumsum(step_sum, dim=-2)  # (B,1,T,1)
         cum_pow_sum = torch.cumsum(step_pow_sum, dim=-2)  # (B,1,T,1)
 
-        entry_cnt = np.arange(channel * freq_num, channel * freq_num * (seq_len + 1), channel * freq_num)
-        entry_cnt = torch.from_numpy(entry_cnt).type(inpt.type())
+        entry_cnt = torch.arange(channel * freq_num, channel * freq_num * (seq_len + 1), channel * freq_num)
+        # entry_cnt = np.arange(channel * freq_num, channel * freq_num * (seq_len + 1), channel * freq_num)
+        # entry_cnt = torch.from_numpy(entry_cnt).type(inpt.type())
         entry_cnt = entry_cnt.view(1, 1, seq_len, 1).expand_as(cum_sum)
 
         cum_mean = cum_sum / entry_cnt

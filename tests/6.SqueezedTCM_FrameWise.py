@@ -9,12 +9,12 @@ class CausalConstantPad1d(nn.Module):
         super(CausalConstantPad1d, self).__init__()
         self.padding = padding
         self.value = value
-        self.state = None
+        self.state = torch.empty(0)
 
     def forward(self, inputs: Tensor):
         assert inputs.shape[-1] == 1, "CausalConstantPad1d only supports 1 time frame input"
 
-        if self.state is None:
+        if self.state.shape[0] == 0:
             inputs = nn.functional.pad(inputs, (*self.padding, 0, 0), "constant", self.value)
         else:
             inputs = torch.cat([self.state, inputs], dim=-1)
@@ -39,8 +39,6 @@ class SqueezedTCM_FW(nn.Module):
         self.d_feat = d_feat
         self.is_causal = is_causal
         self.norm_type = norm_type
-        self.state1 = None
-        self.state2 = None
 
         self.in_conv = nn.Conv1d(d_feat, cd1, 1, bias=False)
         if is_causal:
@@ -79,6 +77,7 @@ def main():
     net1 = SqueezedTCM(5, 64, dilation, 256, True, "iLN")
     net2 = SqueezedTCM_FW(5, 64, dilation, 256, True, "iLN")
     net2.load_state_dict(net1.state_dict())
+    net2 = torch.jit.script(net2)
     net1.eval()
     net2.eval()
 
