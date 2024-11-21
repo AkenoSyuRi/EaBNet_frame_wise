@@ -1,7 +1,9 @@
 import os
 from pathlib import Path
 
+import onnx
 import torch
+from onnxconverter_common import float16
 
 from network.EaBNet_FrameWise_Stateful import EaBNet as EaBNetST
 
@@ -75,10 +77,18 @@ def main():
         output_names=["output", *map(lambda i: f"out_state{i}", range(n_states))],
         opset_version=13,
     )
-    print(f"ONNX model saved to {out_onnx_path}")
+    print(f"ONNX fp32 model saved to {out_onnx_path}")
 
     # Simplify the ONNX model using onnx-simplifier
-    os.system(f"onnxsim {out_onnx_path} {out_onnx_path.with_suffix('.sim.onnx')}")
+    save_sim_path = out_onnx_path.with_suffix(".sim.onnx")
+    os.system(f"onnxsim {out_onnx_path} {save_sim_path}")
+
+    # Convert the ONNX model to float16
+    model = onnx.load(save_sim_path.as_posix())
+    model_fp16 = float16.convert_float_to_float16(model)
+    save_fp16_path = out_onnx_path.with_suffix(".sim_fp16.onnx")
+    onnx.save(model_fp16, save_fp16_path.as_posix())
+    print(f"ONNX fp16 model saved to {save_fp16_path}")
     ...
 
 

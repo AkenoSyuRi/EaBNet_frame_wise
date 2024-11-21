@@ -52,24 +52,24 @@ class Stft:
         return output_data.squeeze()
 
 
-def init_and_check_states(sess: ort.InferenceSession):
+def init_and_check_states(sess: ort.InferenceSession, data_type):
     enc_states = [
-        np.zeros([1, 2 * 8, 1, 161]).astype(np.float32),
-        np.zeros([1, 64, 1, 79]).astype(np.float32),
-        np.zeros([1, 64, 1, 39]).astype(np.float32),
-        np.zeros([1, 64, 1, 19]).astype(np.float32),
-        np.zeros([1, 64, 1, 9]).astype(np.float32),
+        np.zeros([1, 2 * 8, 1, 161]).astype(data_type),
+        np.zeros([1, 64, 1, 79]).astype(data_type),
+        np.zeros([1, 64, 1, 39]).astype(data_type),
+        np.zeros([1, 64, 1, 19]).astype(data_type),
+        np.zeros([1, 64, 1, 9]).astype(data_type),
     ]
 
-    squ_states = [[np.zeros([1, 64, (5 - 1) * 2**i, 2]).astype(np.float32) for i in range(6)] for _ in range(3)]
+    squ_states = [[np.zeros([1, 64, (5 - 1) * 2**i, 2]).astype(data_type) for i in range(6)] for _ in range(3)]
     dec_states = [
-        np.zeros([1, 128, 1, 4]).astype(np.float32),
-        np.zeros([1, 128, 1, 9]).astype(np.float32),
-        np.zeros([1, 128, 1, 19]).astype(np.float32),
-        np.zeros([1, 128, 1, 39]).astype(np.float32),
-        np.zeros([1, 128, 1, 79]).astype(np.float32),
+        np.zeros([1, 128, 1, 4]).astype(data_type),
+        np.zeros([1, 128, 1, 9]).astype(data_type),
+        np.zeros([1, 128, 1, 19]).astype(data_type),
+        np.zeros([1, 128, 1, 39]).astype(data_type),
+        np.zeros([1, 128, 1, 79]).astype(data_type),
     ]
-    rnn_state = np.zeros([2, 161, 64, 2]).astype(np.float32)
+    rnn_state = np.zeros([2, 161, 64, 2]).astype(data_type)
 
     states = enc_states
     for group in squ_states:
@@ -83,19 +83,21 @@ def init_and_check_states(sess: ort.InferenceSession):
             assert inp.shape == out.shape, f"out state shape mismatch: {inp.shape} vs {out.shape}"
             assert inp.shape == list(states[i].shape), f"in state shape mismatch: {inp.shape} vs {states[i].shape}"
             i += 1
-        print(f"{inp.name}: {inp.shape} -> {out.name}: {out.shape}")
+        # print(f"{inp.name}: {inp.shape} -> {out.name}: {out.shape}")
     return states
 
 
 def main():
     in_wav_path = r"D:\Temp\athena_test_out\[real]M16_demo_1_inp.wav"
     out_wav_path = r"D:\Temp\athena_test_out\test_out.wav"
-    onnx_model_path = "data/output/EaBNet_iLN_epoch67.onnx"
-    session = ort.InferenceSession(onnx_model_path)
+    onnx_model_path = "data/output/EaBNet_iLN_epoch67.sim.onnx"
+    session = ort.InferenceSession(onnx_model_path, providers=["OpenVINOExecutionProvider"])
+    data_type = [np.float32, np.float16][0]
+    print("Active providers:", session.get_providers())
 
     # Initialize states
     output_names = [out.name for out in session.get_outputs()]
-    states = init_and_check_states(session)
+    states = init_and_check_states(session, data_type)
 
     in_data, sr = librosa.load(in_wav_path, sr=None, mono=False)
 
@@ -110,7 +112,7 @@ def main():
             frame = in_data[:, i : i + hop_size]
             in_spec = stft.transform(frame).T
             in_spec = np.stack([in_spec.real, in_spec.imag], axis=-1)
-            in_spec = in_spec.astype(np.float32)[None, None]
+            in_spec = in_spec.astype(data_type)[None, None]
 
             ort_inputs = {"input": in_spec}
             for j, state in enumerate(states):
