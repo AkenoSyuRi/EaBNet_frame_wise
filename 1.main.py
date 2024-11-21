@@ -125,8 +125,8 @@ def test_stateful():
 
 
 def main():
-    # test_model_causality()
-    # test_frame_wise()
+    test_model_causality()
+    test_frame_wise()
     test_stateful()
     ...
 

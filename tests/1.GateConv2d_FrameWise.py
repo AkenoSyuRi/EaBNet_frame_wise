@@ -5,7 +5,7 @@ from network.EaBNet_FrameWise_Stateful import GateConv2dFW
 
 
 def main():
-    inputs = torch.randn(1, 16, 7, 161)
+    inputs = torch.randn(1, 16, 100, 161)
     states = torch.zeros(1, 16, 1, 161)
 
     net1 = GateConv2d(16, 32, (2, 3), (1, 3))
