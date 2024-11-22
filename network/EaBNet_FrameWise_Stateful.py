@@ -29,9 +29,10 @@ def get_state_shapes():
         (1, 128, 1, 39),
         (1, 128, 1, 79),
     ]
-    rnn_shape = (2, 161, 64, 2)
+    rnn_shapes = [(2, 161, 64, 2)]
 
-    state_shapes = [map_shapes(enc_shapes), map_shapes(squ_shapes), map_shapes(dec_shapes), rnn_shape]
+    state_shapes = [map_shapes(enc_shapes), map_shapes(squ_shapes), map_shapes(dec_shapes), map_shapes(rnn_shapes)]
+    print("State shapes:", *[(1, sum(map(lambda x: x[0], shapes))) for shapes in state_shapes])
     return state_shapes
 
 
@@ -95,7 +96,7 @@ class EaBNet(nn.Module):
         self.topo_type = topo_type
         self.norm_type = norm_type
 
-        self.enc_shapes, self.squ_shapes, self.dec_shapes, self.rnn_shape = get_state_shapes()
+        self.enc_shapes, self.squ_shapes, self.dec_shapes, self.rnn_shapes = get_state_shapes()
 
         if is_u2:
             self.en = U2NetEncoder(M * 2, k1, k2, c, intra_connect, norm_type)
@@ -689,9 +690,10 @@ class LSTM_BF_FW(nn.Module):
         self.embed_dim = embed_dim
         self.M = M
         self.hid_node = hid_node
+        self.num_layers = 2
 
         # Components
-        self.rnn = nn.LSTM(input_size=embed_dim, hidden_size=hid_node, num_layers=2, batch_first=True)
+        self.rnn = nn.LSTM(input_size=embed_dim, hidden_size=hid_node, num_layers=self.num_layers, batch_first=True)
         self.w_dnn = nn.Sequential(nn.Linear(hid_node, hid_node), nn.ReLU(True), nn.Linear(hid_node, 2 * M))
         self.norm = nn.LayerNorm([embed_dim])
 
@@ -699,7 +701,7 @@ class LSTM_BF_FW(nn.Module):
         """
         formulate the bf operation
         :param embed_x: (B, C, T, F)
-        :param state: (2, B*F, T=1, embed_dim)
+        :param state: (1, num_layers*(B*F)*embed_dim*2)
         :return: (B, T, F, M, 2)
         """
         # norm
@@ -707,9 +709,10 @@ class LSTM_BF_FW(nn.Module):
         x = self.norm(embed_x.permute(0, 3, 2, 1).contiguous())
         x = x.view(B * F, T, -1)
 
+        state = state.view(self.num_layers, B * F, self.embed_dim, 2)
         states = state[..., 0], state[..., 1]
         x, states = self.rnn(x, states)
-        state = torch.stack(states, dim=-1)
+        state = torch.stack(states, dim=-1).reshape(1, -1)
 
         x = x.view(B, F, T, -1).transpose(1, 2).contiguous()
         bf_w = self.w_dnn(x).view(B, T, F, self.M, 2)

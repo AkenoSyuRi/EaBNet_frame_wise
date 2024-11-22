@@ -90,7 +90,7 @@ def test_stateful():
     enc_states = torch.zeros(1, sum(map(lambda item: item[0], net2.enc_shapes)))
     squ_states = torch.zeros(1, sum(map(lambda item: item[0], net2.squ_shapes)))
     dec_states = torch.zeros(1, sum(map(lambda item: item[0], net2.dec_shapes)))
-    rnn_states = torch.zeros(net2.rnn_shape)
+    rnn_states = torch.zeros(1, net2.rnn_shapes[0][0])
 
     out2_list = []
     with torch.no_grad():

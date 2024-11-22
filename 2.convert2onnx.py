@@ -45,19 +45,29 @@ def main():
     state_dict = torch.load(in_ckpt_path, "cpu")
     del state_dict["stft.window"], state_dict["istft.window"]
     load_state_dict_from1to2(state_dict, net.state_dict())
+    net.eval()
 
     inputs = torch.randn(1, 1, 161, 8, 2)
     enc_states = torch.zeros(1, sum(map(lambda item: item[0], net.enc_shapes)))
     squ_states = torch.zeros(1, sum(map(lambda item: item[0], net.squ_shapes)))
     dec_states = torch.zeros(1, sum(map(lambda item: item[0], net.dec_shapes)))
-    rnn_states = torch.zeros(net.rnn_shape)
-    n_states = len(enc_states) + len(squ_states) + len(dec_states) + 1
+    rnn_states = torch.zeros(1, net.rnn_shapes[0][0])
 
     traced_net = torch.jit.trace(net, (inputs, enc_states, squ_states, dec_states, rnn_states))
     traced_net.save(out_pt_path.as_posix())
     print(f"JIT trace model saved to {out_pt_path}")
 
+    # # convert to PNNX
+    # shape_str = "[" + ",".join(map(str, inputs.shape)) + "],"
+    # for state in (enc_states, squ_states, dec_states):
+    #     shape_str += "[" + ",".join(map(str, state.shape)) + "],"
+    # shape_str += "[" + ",".join(map(str, rnn_states.shape)) + "]"
+    # os.system(f"pnnx {out_pt_path} inputshape={shape_str}")
+    # for dbg_file in ["debug.bin", "debug.param", "debug2.bin", "debug2.param"]:
+    #     os.remove(dbg_file)
+
     out_onnx_path = out_pt_path.with_suffix(".onnx")
+    n_states = len(enc_states) + len(squ_states) + len(dec_states) + len(rnn_states)
     torch.onnx.export(
         net,
         (inputs, enc_states, squ_states, dec_states, rnn_states),

@@ -21,7 +21,7 @@ def main():
     net2.eval()
 
     x = torch.randn(1, 64, 200, 161)
-    state = torch.zeros(2, 161, 64, 2)
+    state = torch.zeros(1, 2*161*64*2)
 
     y2_list = []
     with torch.no_grad():
