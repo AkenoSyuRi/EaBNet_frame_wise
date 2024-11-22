@@ -2,7 +2,7 @@ import wave
 
 import librosa
 import numpy as np
-import onnxruntime as ort
+from openvino.runtime import Core
 from tqdm import trange
 
 
@@ -18,7 +18,6 @@ class Stft:
 
         self.in_win_data = np.zeros([in_channels, win_size])
         self.out_ola_data = np.zeros([out_channels, win_size])
-        ...
 
     @staticmethod
     def get_win_sum_of_1frame(window, win_len, win_inc):
@@ -52,53 +51,35 @@ class Stft:
         return output_data.squeeze()
 
 
-def init_and_check_states(sess: ort.InferenceSession, data_type):
-    enc_states = [
-        np.zeros([1, 2 * 8, 1, 161]).astype(data_type),
-        np.zeros([1, 64, 1, 79]).astype(data_type),
-        np.zeros([1, 64, 1, 39]).astype(data_type),
-        np.zeros([1, 64, 1, 19]).astype(data_type),
-        np.zeros([1, 64, 1, 9]).astype(data_type),
-    ]
-
-    squ_states = [[np.zeros([1, 64, (5 - 1) * 2**i, 2]).astype(data_type) for i in range(6)] for _ in range(3)]
-    dec_states = [
-        np.zeros([1, 128, 1, 4]).astype(data_type),
-        np.zeros([1, 128, 1, 9]).astype(data_type),
-        np.zeros([1, 128, 1, 19]).astype(data_type),
-        np.zeros([1, 128, 1, 39]).astype(data_type),
-        np.zeros([1, 128, 1, 79]).astype(data_type),
-    ]
-    rnn_state = np.zeros([2, 161, 64, 2]).astype(data_type)
-
-    states = enc_states
-    for group in squ_states:
-        states += group
-    states += dec_states
-    states += [rnn_state]
-
-    i = 0
-    for inp, out in zip(sess.get_inputs(), sess.get_outputs()):
-        if "state" in inp.name:
-            assert inp.shape == out.shape, f"out state shape mismatch: {inp.shape} vs {out.shape}"
-            assert inp.shape == list(states[i].shape), f"in state shape mismatch: {inp.shape} vs {states[i].shape}"
-            i += 1
-        # print(f"{inp.name}: {inp.shape} -> {out.name}: {out.shape}")
+def init_states(model_input_shapes, data_type):
+    states = []
+    for shape in model_input_shapes:
+        states.append(np.zeros(shape, dtype=data_type))
     return states
 
 
 def main():
     in_wav_path = r"D:\Temp\athena_test_out\[real]M16_demo_1_inp.wav"
     out_wav_path = r"D:\Temp\athena_test_out\test_out.wav"
-    onnx_model_path = "data/output/EaBNet_iLN_epoch67.sim.onnx"
-    session = ort.InferenceSession(onnx_model_path)
+    onnx_model_path = "data/output/EaBNet_iLN_epoch67.xml"
     data_type = [np.float32, np.float16][0]
-    print("Active providers:", session.get_providers())
+
+    # Initialize OpenVINO Core and load model
+    core = Core()
+    model = core.read_model(onnx_model_path)
+    compiled_model = core.compile_model(model, "CPU")  # Use "AUTO" or "GPU" if hardware available
+    infer_request = compiled_model.create_infer_request()
+
+    # Get model input and state shapes
+    input_tensor = compiled_model.inputs[0]
+    state_tensors = compiled_model.inputs[1:]
+    output_tensors = compiled_model.outputs
+    state_shapes = [state_tensor.shape for state_tensor in state_tensors]
 
     # Initialize states
-    output_names = [out.name for out in session.get_outputs()]
-    states = init_and_check_states(session, data_type)
+    states = init_states(state_shapes, data_type)
 
+    # Read input audio
     in_data, sr = librosa.load(in_wav_path, sr=None, mono=False)
 
     win_size, hop_size, in_channels, out_channels = 320, 160, 8, 1
@@ -114,21 +95,23 @@ def main():
             in_spec = np.stack([in_spec.real, in_spec.imag], axis=-1)
             in_spec = in_spec.astype(data_type)[None, None]
 
-            ort_inputs = {"input": in_spec}
-            for j, state in enumerate(states):
-                ort_inputs[f"in_state{j}"] = state
+            # Prepare input dictionary
+            inputs = {input_tensor: in_spec}
+            for state_tensor, state in zip(state_tensors, states):
+                inputs[state_tensor] = state
 
-            ort_outs = session.run(output_names, ort_inputs)
-            out_spec, states = ort_outs[0].squeeze(), ort_outs[1:]
+            # Run inference
+            infer_request.infer(inputs)
+            out_spec = infer_request.get_tensor(output_tensors[0]).data.squeeze()
+            states = [infer_request.get_tensor(state_tensor).data for state_tensor in output_tensors[1:]]
+
+            # Convert output spectrogram back to time-domain audio
             out_spec = out_spec[0] + 1j * out_spec[1]
             out_data = stft.inverse(out_spec)
 
             out_data = (out_data * 32768).astype(np.int16)
             fp.writeframes(out_data.tobytes())
-            ...
-    ...
 
 
 if __name__ == "__main__":
     main()
-    ...

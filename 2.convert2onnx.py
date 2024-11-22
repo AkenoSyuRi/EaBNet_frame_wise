@@ -1,9 +1,8 @@
 import os
 from pathlib import Path
 
-import onnx
+import openvino as ov
 import torch
-from onnxconverter_common import float16
 
 from network.EaBNet_FrameWise_Stateful import EaBNet as EaBNetST
 
@@ -83,12 +82,19 @@ def main():
     save_sim_path = out_onnx_path.with_suffix(".sim.onnx")
     os.system(f"onnxsim {out_onnx_path} {save_sim_path}")
 
-    # Convert the ONNX model to float16
-    model = onnx.load(save_sim_path.as_posix())
-    model_fp16 = float16.convert_float_to_float16(model)
-    save_fp16_path = out_onnx_path.with_suffix(".sim_fp16.onnx")
-    onnx.save(model_fp16, save_fp16_path.as_posix())
-    print(f"ONNX fp16 model saved to {save_fp16_path}")
+    # Convert the ONNX model to OpenVINO IR
+    core = ov.Core()
+    ov_model = core.read_model(save_sim_path)
+    save_vino_path = out_onnx_path.with_suffix(".xml")
+    ov.save_model(ov_model, save_vino_path, compress_to_fp16=True)  # enabled by default
+    print(f"OpenVINO model saved to {save_vino_path}")
+
+    # # Convert the ONNX model to float16
+    # model = onnx.load(save_sim_path.as_posix())
+    # model_fp16 = float16.convert_float_to_float16(model)
+    # save_fp16_path = out_onnx_path.with_suffix(".sim_fp16.onnx")
+    # onnx.save(model_fp16, save_fp16_path.as_posix())
+    # print(f"ONNX fp16 model saved to {save_fp16_path}")
     ...
 
 
