@@ -17,7 +17,6 @@ def main():
     net1 = LSTM_BF(64, 8)
     net2 = LSTM_BF_FW(64, 8)
     load_state_dict_from1to2(net1.state_dict(), net2.state_dict())
-    net2 = torch.jit.script(net2)
     net1.eval()
     net2.eval()
 

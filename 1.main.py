@@ -57,7 +57,6 @@ def test_frame_wise():
     net1 = EaBNet(**kwargs)
     net2 = EaBNetFW(**kwargs)
     load_state_dict_from1to2(net1.state_dict(), net2.state_dict())
-    net2 = torch.jit.script(net2)
     net1.eval()
     net2.eval()
 
@@ -83,28 +82,15 @@ def test_stateful():
     net1 = EaBNet(**kwargs)
     net2 = EaBNetST(**kwargs)
     load_state_dict_from1to2(net1.state_dict(), net2.state_dict())
-    net2 = torch.jit.script(net2)
     net1.eval()
     net2.eval()
 
-    M, c, kd1, p, q = kwargs["M"], kwargs["c"], kwargs["kd1"], kwargs["p"], kwargs["q"]
+    M = kwargs["M"]
     x = torch.randn(1, 100, 161, M, 2)
-    enc_states = [
-        torch.zeros(1, 2 * M, 1, 161),
-        torch.zeros(1, c, 1, 79),
-        torch.zeros(1, c, 1, 39),
-        torch.zeros(1, c, 1, 19),
-        torch.zeros(1, c, 1, 9),
-    ]
-    squ_states = [torch.zeros(1, 64, (kd1 - 1) * 2**i, 2) for _ in range(q) for i in range(p)]
-    dec_states = [
-        torch.zeros(1, 128, 1, 4),
-        torch.zeros(1, 128, 1, 9),
-        torch.zeros(1, 128, 1, 19),
-        torch.zeros(1, 128, 1, 39),
-        torch.zeros(1, 128, 1, 79),
-    ]
-    rnn_states = torch.zeros(2, 161, 64, 2)
+    enc_states = torch.zeros(1, sum(map(lambda item: item[0], net2.enc_shapes)))
+    squ_states = torch.zeros(1, sum(map(lambda item: item[0], net2.squ_shapes)))
+    dec_states = torch.zeros(1, sum(map(lambda item: item[0], net2.dec_shapes)))
+    rnn_states = torch.zeros(net2.rnn_shape)
 
     out2_list = []
     with torch.no_grad():

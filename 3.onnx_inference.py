@@ -53,36 +53,13 @@ class Stft:
 
 
 def init_and_check_states(sess: ort.InferenceSession, data_type):
-    enc_states = [
-        np.zeros([1, 2 * 8, 1, 161]).astype(data_type),
-        np.zeros([1, 64, 1, 79]).astype(data_type),
-        np.zeros([1, 64, 1, 39]).astype(data_type),
-        np.zeros([1, 64, 1, 19]).astype(data_type),
-        np.zeros([1, 64, 1, 9]).astype(data_type),
-    ]
-
-    squ_states = [np.zeros([1, 64, (5 - 1) * 2**i, 2]).astype(data_type) for _ in range(3) for i in range(6)]
-    dec_states = [
-        np.zeros([1, 128, 1, 4]).astype(data_type),
-        np.zeros([1, 128, 1, 9]).astype(data_type),
-        np.zeros([1, 128, 1, 19]).astype(data_type),
-        np.zeros([1, 128, 1, 39]).astype(data_type),
-        np.zeros([1, 128, 1, 79]).astype(data_type),
-    ]
-    rnn_state = np.zeros([2, 161, 64, 2]).astype(data_type)
-
-    states = enc_states
-    states += squ_states
-    states += dec_states
-    states += [rnn_state]
-
-    i = 0
-    for inp, out in zip(sess.get_inputs(), sess.get_outputs()):
-        if "state" in inp.name:
-            assert inp.shape == out.shape, f"out state shape mismatch: {inp.shape} vs {out.shape}"
-            assert inp.shape == list(states[i].shape), f"in state shape mismatch: {inp.shape} vs {states[i].shape}"
-            i += 1
-        # print(f"{inp.name}: {inp.shape} -> {out.name}: {out.shape}")
+    states = []
+    inputs = sess.get_inputs()
+    outputs = sess.get_outputs()
+    assert len(inputs) == len(outputs), "The number of inputs and outputs must be equal"
+    for i in range(1, len(inputs)):
+        assert inputs[i].shape == outputs[i].shape, "The shape of inputs and outputs must be equal"
+        states.append(np.zeros(inputs[i].shape, dtype=data_type))
     return states
 
 

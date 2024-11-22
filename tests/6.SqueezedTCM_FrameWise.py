@@ -18,7 +18,6 @@ def main():
     net1 = SqueezedTCM(kd1, 64, dilation, 256, True, "iLN")
     net2 = SqueezedTCM_FW(kd1, 64, dilation, 256, True, "iLN")
     load_state_dict_from1to2(net1.state_dict(), net2.state_dict())
-    net2 = torch.jit.script(net2)
     net1.eval()
     net2.eval()
 

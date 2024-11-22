@@ -39,37 +39,28 @@ def load_state_dict_from1to2(dict1, dict2):
 
 def main():
     in_ckpt_path = r"F:\Projects\PycharmProjects\M16_demo\data\ckpt\EaBNet_iLN_epoch67.pth"
-    out_onnx_path = Path(r"data/output/EaBNet_iLN_epoch67.onnx")
+    out_pt_path = Path(r"data/output/EaBNet_iLN_epoch67.pt")
     kwargs = get_default_config()
     net = EaBNetST(**kwargs)
     state_dict = torch.load(in_ckpt_path, "cpu")
     del state_dict["stft.window"], state_dict["istft.window"]
     load_state_dict_from1to2(state_dict, net.state_dict())
 
-    enc_states = [
-        torch.zeros(1, 2 * 8, 1, 161),
-        torch.zeros(1, 64, 1, 79),
-        torch.zeros(1, 64, 1, 39),
-        torch.zeros(1, 64, 1, 19),
-        torch.zeros(1, 64, 1, 9),
-    ]
-
-    squ_states = [torch.zeros(1, 64, (5 - 1) * 2**i, 2) for _ in range(3) for i in range(6)]
-    dec_states = [
-        torch.zeros(1, 128, 1, 4),
-        torch.zeros(1, 128, 1, 9),
-        torch.zeros(1, 128, 1, 19),
-        torch.zeros(1, 128, 1, 39),
-        torch.zeros(1, 128, 1, 79),
-    ]
-    rnn_state = torch.zeros(2, 161, 64, 2)
-
     inputs = torch.randn(1, 1, 161, 8, 2)
+    enc_states = torch.zeros(1, sum(map(lambda item: item[0], net.enc_shapes)))
+    squ_states = torch.zeros(1, sum(map(lambda item: item[0], net.squ_shapes)))
+    dec_states = torch.zeros(1, sum(map(lambda item: item[0], net.dec_shapes)))
+    rnn_states = torch.zeros(net.rnn_shape)
     n_states = len(enc_states) + len(squ_states) + len(dec_states) + 1
 
+    traced_net = torch.jit.trace(net, (inputs, enc_states, squ_states, dec_states, rnn_states))
+    traced_net.save(out_pt_path.as_posix())
+    print(f"JIT trace model saved to {out_pt_path}")
+
+    out_onnx_path = out_pt_path.with_suffix(".onnx")
     torch.onnx.export(
         net,
-        (inputs, enc_states, squ_states, dec_states, rnn_state),
+        (inputs, enc_states, squ_states, dec_states, rnn_states),
         out_onnx_path.as_posix(),
         input_names=["input", *map(lambda i: f"in_state{i}", range(n_states))],
         output_names=["output", *map(lambda i: f"out_state{i}", range(n_states))],

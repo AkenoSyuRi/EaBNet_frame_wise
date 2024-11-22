@@ -19,7 +19,6 @@ def main():
     net1 = U2Net_Encoder(M * 2, k1, k2, c, intra_connect, norm_type)
     net2 = U2Net_Encoder_FrameWise(M * 2, k1, k2, c, intra_connect, norm_type)
     load_state_dict_from1to2(net1.state_dict(), net2.state_dict())
-    net2 = torch.jit.script(net2)
     net1.eval()
     net2.eval()
 

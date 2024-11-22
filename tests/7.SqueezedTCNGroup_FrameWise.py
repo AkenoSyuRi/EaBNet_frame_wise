@@ -20,7 +20,6 @@ def main():
     net1 = nn.ModuleList([SqueezedTCNGroup(kd1, 64, 256, p, True, "iLN") for _ in range(q)])
     net2 = nn.ModuleList([SqueezedTCNGroup_FrameWise(kd1, 64, 256, p, True, "iLN") for _ in range(q)])
     load_state_dict_from1to2(net1.state_dict(), net2.state_dict())
-    net2 = torch.jit.script(net2)
     net1.eval()
     net2.eval()
 

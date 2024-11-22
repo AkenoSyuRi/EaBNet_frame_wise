@@ -17,7 +17,6 @@ def main():
     net1 = U2Net_Decoder(64, 64, (2, 3), (1, 3), "cat", "iLN")
     net2 = U2Net_Decoder_FrameWise(64, 64, (2, 3), (1, 3), "cat", "iLN")
     load_state_dict_from1to2(net1.state_dict(), net2.state_dict())
-    net2 = torch.jit.script(net2)
     net1.eval()
     net2.eval()
 

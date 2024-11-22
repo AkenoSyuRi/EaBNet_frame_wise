@@ -7,6 +7,34 @@ from torch.autograd import Variable
 from torchaudio import transforms as TT
 
 
+def get_state_shapes():
+    import numpy as np
+
+    def map_shapes(shapes):
+        return [(np.prod(shape), shape) for shape in shapes]
+
+    enc_shapes = [
+        (1, 2 * 8, 1, 161),
+        (1, 64, 1, 79),
+        (1, 64, 1, 39),
+        (1, 64, 1, 19),
+        (1, 64, 1, 9),
+    ]
+
+    squ_shapes = [(1, 64, (5 - 1) * 2**i, 2) for _ in range(3) for i in range(6)]
+    dec_shapes = [
+        (1, 128, 1, 4),
+        (1, 128, 1, 9),
+        (1, 128, 1, 19),
+        (1, 128, 1, 39),
+        (1, 128, 1, 79),
+    ]
+    rnn_shape = (2, 161, 64, 2)
+
+    state_shapes = [map_shapes(enc_shapes), map_shapes(squ_shapes), map_shapes(dec_shapes), rnn_shape]
+    return state_shapes
+
+
 class EaBNet(nn.Module):
     def __init__(
         self,
@@ -67,6 +95,8 @@ class EaBNet(nn.Module):
         self.topo_type = topo_type
         self.norm_type = norm_type
 
+        self.enc_shapes, self.squ_shapes, self.dec_shapes, self.rnn_shape = get_state_shapes()
+
         if is_u2:
             self.en = U2NetEncoder(M * 2, k1, k2, c, intra_connect, norm_type)
             self.de = U2NetDecoder(embed_dim, c, k1, k2, intra_connect, norm_type)
@@ -87,18 +117,35 @@ class EaBNet(nn.Module):
             stcn_list.append(SqueezedTCNGroup(kd1, cd1, d_feat, p, is_causal, norm_type))
         self.stcns = nn.ModuleList(stcn_list)
 
+    @staticmethod
+    def _unflatten_states(states: Tensor, shapes: List[Tuple[int, Tuple[int, int, int, int]]]) -> List[Tensor]:
+        i = 0
+        out_states = []
+        for numel, shape in shapes:
+            out_states.append(states[:, i : i + numel].view(shape))
+            i += numel
+        return out_states
+
+    @staticmethod
+    def _flatten_states(states: List[Tensor]) -> Tensor:
+        return torch.cat([state.flatten(1) for state in states], dim=1)
+
     def forward(
         self,
         inpt: Tensor,
-        enc_states: List[Tensor],
-        squ_states: List[Tensor],
-        dec_states: List[Tensor],
+        enc_states: Tensor,
+        squ_states: Tensor,
+        dec_states: Tensor,
         rnn_states: Tensor,
-    ) -> Tuple[Tensor, List[Tensor], List[Tensor], List[Tensor], Tensor]:
+    ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         """
         :param inpt: (B, T, F, M, 2) -> (batchsize, seqlen, freqsize, mics, 2)
         :return: beamformed estimation: (B, 2, T, F)
         """
+        enc_states = self._unflatten_states(enc_states, self.enc_shapes)
+        squ_states = self._unflatten_states(squ_states, self.squ_shapes)
+        dec_states = self._unflatten_states(dec_states, self.dec_shapes)
+
         if inpt.ndim == 4:
             inpt = inpt.unsqueeze(dim=-2)
         b_size, seq_len, freq_len, M, _ = inpt.shape
@@ -109,7 +156,7 @@ class EaBNet(nn.Module):
         x = x.transpose(-2, -1).contiguous().view(b_size, -1, seq_len)
         x_acc = torch.zeros(x.size(), dtype=x.dtype, device=x.device)
 
-        in_squ_states = [squ_states[i * self.p: (i + 1) * self.p] for i in range(self.q)]
+        in_squ_states = [squ_states[i * self.p : (i + 1) * self.p] for i in range(self.q)]
         out_squ_states = []
         for i, stcn in enumerate(self.stcns):
             x, in_squ_states[i] = stcn(x, in_squ_states[i])
@@ -142,6 +189,10 @@ class EaBNet(nn.Module):
         #     )
         else:
             raise NotImplementedError("topo_type should be 'mimo'.")
+
+        enc_states = self._flatten_states(enc_states)
+        squ_states = self._flatten_states(squ_states)
+        dec_states = self._flatten_states(dec_states)
         return torch.stack((esti_x_r, esti_x_i), dim=1), enc_states, squ_states, dec_states, rnn_states
 
 

@@ -11,7 +11,6 @@ def main():
     net1 = GateConv2d(16, 32, (2, 3), (1, 3))
     net2 = GateConv2dFW(16, 32, (2, 3), (1, 3))
     net2.load_state_dict(net1.state_dict())
-    net2 = torch.jit.script(net2)
     net1.eval()
     net2.eval()
 
