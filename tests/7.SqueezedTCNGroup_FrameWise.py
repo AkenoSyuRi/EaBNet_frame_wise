@@ -25,8 +25,9 @@ def main():
     net2.eval()
 
     x = torch.randn(1, 256, 200)
-    states = [[torch.zeros(1, 64, (kd1 - 1) * 2**i, 2) for i in range(p)] for _ in range(q)]
+    states = [torch.zeros(1, 64, (kd1 - 1) * 2**i, 2) for _ in range(q) for i in range(p)]
 
+    states = [states[i * p : (i + 1) * p] for i in range(q)]
     with torch.no_grad():
         y1 = x
         for j in range(q):

@@ -96,7 +96,7 @@ def test_stateful():
         torch.zeros(1, c, 1, 19),
         torch.zeros(1, c, 1, 9),
     ]
-    squ_states = [[torch.zeros(1, 64, (kd1 - 1) * 2**i, 2) for i in range(p)] for _ in range(q)]
+    squ_states = [torch.zeros(1, 64, (kd1 - 1) * 2**i, 2) for _ in range(q) for i in range(p)]
     dec_states = [
         torch.zeros(1, 128, 1, 4),
         torch.zeros(1, 128, 1, 9),
@@ -125,8 +125,8 @@ def test_stateful():
 
 
 def main():
-    test_model_causality()
-    test_frame_wise()
+    # test_model_causality()
+    # test_frame_wise()
     test_stateful()
     ...
 

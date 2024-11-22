@@ -91,10 +91,10 @@ class EaBNet(nn.Module):
         self,
         inpt: Tensor,
         enc_states: List[Tensor],
-        squ_states: List[List[Tensor]],
+        squ_states: List[Tensor],
         dec_states: List[Tensor],
         rnn_states: Tensor,
-    ) -> Tuple[Tensor, List[Tensor], List[List[Tensor]], List[Tensor], Tensor]:
+    ) -> Tuple[Tensor, List[Tensor], List[Tensor], List[Tensor], Tensor]:
         """
         :param inpt: (B, T, F, M, 2) -> (batchsize, seqlen, freqsize, mics, 2)
         :return: beamformed estimation: (B, 2, T, F)
@@ -108,9 +108,15 @@ class EaBNet(nn.Module):
         c = x.shape[1]
         x = x.transpose(-2, -1).contiguous().view(b_size, -1, seq_len)
         x_acc = torch.zeros(x.size(), dtype=x.dtype, device=x.device)
+
+        in_squ_states = [squ_states[i * self.p: (i + 1) * self.p] for i in range(self.q)]
+        out_squ_states = []
         for i, stcn in enumerate(self.stcns):
-            x, squ_states[i] = stcn(x, squ_states[i])
+            x, in_squ_states[i] = stcn(x, in_squ_states[i])
+            out_squ_states += in_squ_states[i]
             x_acc = x_acc + x
+        squ_states = out_squ_states
+
         x = x_acc
         x = x.view(b_size, c, -1, seq_len).transpose(-2, -1).contiguous()
         x, dec_states = self.de(x, en_list, dec_states)

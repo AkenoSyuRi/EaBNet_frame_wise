@@ -1,7 +1,6 @@
 import os
 from pathlib import Path
 
-import openvino as ov
 import torch
 
 from network.EaBNet_FrameWise_Stateful import EaBNet as EaBNetST
@@ -55,7 +54,7 @@ def main():
         torch.zeros(1, 64, 1, 9),
     ]
 
-    squ_states = [[torch.zeros(1, 64, (5 - 1) * 2**i, 2) for i in range(6)] for _ in range(3)]
+    squ_states = [torch.zeros(1, 64, (5 - 1) * 2**i, 2) for _ in range(3) for i in range(6)]
     dec_states = [
         torch.zeros(1, 128, 1, 4),
         torch.zeros(1, 128, 1, 9),
@@ -66,7 +65,7 @@ def main():
     rnn_state = torch.zeros(2, 161, 64, 2)
 
     inputs = torch.randn(1, 1, 161, 8, 2)
-    n_states = len(enc_states) + len(squ_states) * len(squ_states[0]) + len(dec_states) + 1
+    n_states = len(enc_states) + len(squ_states) + len(dec_states) + 1
 
     torch.onnx.export(
         net,
@@ -74,7 +73,7 @@ def main():
         out_onnx_path.as_posix(),
         input_names=["input", *map(lambda i: f"in_state{i}", range(n_states))],
         output_names=["output", *map(lambda i: f"out_state{i}", range(n_states))],
-        opset_version=13,
+        opset_version=12,
     )
     print(f"ONNX fp32 model saved to {out_onnx_path}")
 
@@ -82,12 +81,12 @@ def main():
     save_sim_path = out_onnx_path.with_suffix(".sim.onnx")
     os.system(f"onnxsim {out_onnx_path} {save_sim_path}")
 
-    # Convert the ONNX model to OpenVINO IR
-    core = ov.Core()
-    ov_model = core.read_model(save_sim_path)
-    save_vino_path = out_onnx_path.with_suffix(".xml")
-    ov.save_model(ov_model, save_vino_path, compress_to_fp16=True)  # enabled by default
-    print(f"OpenVINO model saved to {save_vino_path}")
+    # # Convert the ONNX model to OpenVINO IR
+    # core = ov.Core()
+    # ov_model = core.read_model(save_sim_path)
+    # save_vino_path = out_onnx_path.with_suffix(".xml")
+    # ov.save_model(ov_model, save_vino_path, compress_to_fp16=True)  # enabled by default
+    # print(f"OpenVINO model saved to {save_vino_path}")
 
     # # Convert the ONNX model to float16
     # model = onnx.load(save_sim_path.as_posix())

@@ -61,7 +61,7 @@ def init_and_check_states(sess: ort.InferenceSession, data_type):
         np.zeros([1, 64, 1, 9]).astype(data_type),
     ]
 
-    squ_states = [[np.zeros([1, 64, (5 - 1) * 2**i, 2]).astype(data_type) for i in range(6)] for _ in range(3)]
+    squ_states = [np.zeros([1, 64, (5 - 1) * 2**i, 2]).astype(data_type) for _ in range(3) for i in range(6)]
     dec_states = [
         np.zeros([1, 128, 1, 4]).astype(data_type),
         np.zeros([1, 128, 1, 9]).astype(data_type),
@@ -72,8 +72,7 @@ def init_and_check_states(sess: ort.InferenceSession, data_type):
     rnn_state = np.zeros([2, 161, 64, 2]).astype(data_type)
 
     states = enc_states
-    for group in squ_states:
-        states += group
+    states += squ_states
     states += dec_states
     states += [rnn_state]
 
